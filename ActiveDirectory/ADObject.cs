@@ -41,13 +41,10 @@ namespace ActiveDirectory
         /// dictionary so they remain accessible after the <see cref="SearchResultCollection"/>
         /// is disposed. Property reads are served entirely from this cache.
         /// </summary>
-        internal void SetFromResult(SearchResult result, IEnumerable<string>? requestedProperties = null)
+        internal void SetFromResult(SearchResult result)
         {
             _ldapPath = result.Path;
             _cache = new Dictionary<string, List<object?>>(StringComparer.OrdinalIgnoreCase);
-            if (requestedProperties != null)
-                foreach (string prop in requestedProperties)
-                    _cache[prop] = new List<object?>();
             foreach (string propName in result.Properties.PropertyNames)
             {
                 var values = new List<object?>(result.Properties[propName].Count);
@@ -63,7 +60,7 @@ namespace ActiveDirectory
         /// either because it has not been populated at all, or because it was populated from a
         /// <see cref="DirectorySearch"/> result and <see cref="Bind"/> has not been called yet.
         /// </summary>
-        protected DirectoryEntry EnsureEntry()
+        protected DirectoryEntry AssertBound()
         {
             if (adobject == null)
             {
@@ -85,8 +82,7 @@ namespace ActiveDirectory
         /// <para>
         /// Must be called explicitly when this object was populated from a <see cref="DirectorySearch"/>
         /// result and you need to access properties that were not pre-fetched, or properties that
-        /// always require a live connection (e.g. <see cref="LDAPName"/>,
-        /// <see cref="WhenCreated"/>, <see cref="WhenChanged"/>).
+        /// always require a live connection.
         /// Prefer adding required attributes to <see cref="DirectorySearch.PropertiesToLoad"/> over
         /// calling Bind().
         /// </para>
@@ -128,7 +124,7 @@ namespace ActiveDirectory
         /// <exception cref="InvalidOperationException">Thrown if the object is not yet bound.</exception>
         public void Refresh()
         {
-            EnsureEntry().RefreshCache();
+            AssertBound().RefreshCache();
         }
 
         /// <summary>
@@ -180,7 +176,7 @@ namespace ActiveDirectory
         {
             get
             {
-                return EnsureEntry().SchemaClassName switch
+                return AssertBound().SchemaClassName switch
                 {
                     "user"       => ObjectClass.User,
                     "group"      => ObjectClass.Group,
@@ -194,7 +190,7 @@ namespace ActiveDirectory
         /// <summary>Gets the underlying <see cref="DirectoryEntry"/> for direct access when needed.</summary>
         public DirectoryEntry Get
         {
-            get { return EnsureEntry(); }
+            get { return AssertBound(); }
         }
 
         /// <summary>
@@ -214,7 +210,7 @@ namespace ActiveDirectory
                         return new ADGuid(bytes);
                     return new ADGuid(); // objectguid is always loaded by DirectorySearch.CreateSearcher
                 }
-                return new ADGuid(EnsureEntry().NativeGuid);
+                return new ADGuid(AssertBound().NativeGuid);
             }
         }
 
@@ -236,7 +232,7 @@ namespace ActiveDirectory
         /// </summary>
         public String LDAPName
         {
-            get { return EnsureEntry().Name; }
+            get { return AssertBound().Name; }
         }
 
         /// <summary>
@@ -250,7 +246,9 @@ namespace ActiveDirectory
         {
             get
             {
-                object? val = EnsureEntry().Properties[ADProperties.WhenCreated].Value;
+                if (_cache != null && _cache.TryGetValue(ADProperties.WhenCreated, out var vals) && vals.Count > 0 && vals[0] is DateTime dt)
+                    return dt;
+                object? val = AssertBound().Properties[ADProperties.WhenCreated].Value;
                 if (val == null)
                     throw new InvalidOperationException(
                         $"Active Directory object has no '{ADProperties.WhenCreated}' attribute.");
@@ -267,7 +265,12 @@ namespace ActiveDirectory
         /// </summary>
         public DateTime? WhenChanged
         {
-            get { return (DateTime?)EnsureEntry().Properties[ADProperties.WhenChanged].Value; }
+            get
+            {
+                if (_cache != null && _cache.TryGetValue(ADProperties.WhenChanged, out var vals) && vals.Count > 0 && vals[0] is DateTime dt)
+                    return dt;
+                return (DateTime?)AssertBound().Properties[ADProperties.WhenChanged].Value;
+            }
         }
 
         /// <summary>
@@ -314,7 +317,7 @@ namespace ActiveDirectory
             {
                 List<String> list = new List<String>();
 
-                foreach (string prop in EnsureEntry().Properties.PropertyNames)
+                foreach (string prop in AssertBound().Properties.PropertyNames)
                 {
                     list.Add(prop);
                 }
@@ -336,15 +339,15 @@ namespace ActiveDirectory
         {
             if (_cache != null)
             {
-                if (_cache.TryGetValue(propertyName, out var vals))
-                    return vals.Count > 0 ? vals[0] as string ?? "" : "";
+                if (_cache.TryGetValue(propertyName, out var vals) && vals.Count > 0)
+                    return vals[0] as string ?? "";
                 if (adobject == null)
                     throw new InvalidOperationException(
                         $"Property '{propertyName}' was not included in the search results. " +
                         "Add it to PropertiesToLoad, or call Bind() to open a live connection.");
                 // Bind() has been called — fall through to live entry read.
             }
-            return EnsureEntry().Properties[propertyName].Value as string ?? "";
+            return AssertBound().Properties[propertyName].Value as string ?? "";
         }
 
         /// <summary>
@@ -356,7 +359,7 @@ namespace ActiveDirectory
         /// <param name="value">The value to write, or an empty string to clear the attribute.</param>
         public void SetProperty(String propertyName, String value)
         {
-            EnsureEntry().Properties[propertyName].Value = value.Length > 0 ? value : null;
+            AssertBound().Properties[propertyName].Value = value.Length > 0 ? value : null;
         }
 
         /// <summary>
@@ -373,7 +376,7 @@ namespace ActiveDirectory
         {
             if (_cache != null)
             {
-                if (_cache.TryGetValue(property, out var vals))
+                if (_cache.TryGetValue(property, out var vals) && vals.Count > 0)
                 {
                     var result = new List<string>(vals.Count);
                     foreach (var v in vals)
@@ -387,7 +390,7 @@ namespace ActiveDirectory
                 // Bind() has been called — fall through to live entry read.
             }
 
-            object? val = EnsureEntry().Properties[property].Value;
+            object? val = AssertBound().Properties[property].Value;
             if (val == null) return new List<String>();
             if (val is Array arr) return arr.OfType<String>().ToList();
             try { return new List<String> { (String)val }; }
@@ -411,8 +414,8 @@ namespace ActiveDirectory
         {
             if (_cache != null)
             {
-                if (_cache.TryGetValue(property, out var vals))
-                    return vals.Count > 0 && vals[0] is int i ? i : null;
+                if (_cache.TryGetValue(property, out var vals) && vals.Count > 0)
+                    return vals[0] is int i ? i : null;
                 if (adobject == null)
                     throw new InvalidOperationException(
                         $"Property '{property}' was not included in the search results. " +
@@ -420,7 +423,7 @@ namespace ActiveDirectory
                 // Bind() has been called — fall through to live entry read.
             }
 
-            object? val = EnsureEntry().Properties[property].Value;
+            object? val = AssertBound().Properties[property].Value;
             if (val == null) return null;
             try { return (Int32)val; }
             catch (InvalidCastException ex)
@@ -444,8 +447,8 @@ namespace ActiveDirectory
         {
             if (_cache != null)
             {
-                if (_cache.TryGetValue(property, out var vals))
-                    return vals.Count > 0 && vals[0] is bool b ? b : defaultValue;
+                if (_cache.TryGetValue(property, out var vals) && vals.Count > 0)
+                    return vals[0] is bool b ? b : defaultValue;
                 if (adobject == null)
                     throw new InvalidOperationException(
                         $"Property '{property}' was not included in the search results. " +
@@ -453,7 +456,7 @@ namespace ActiveDirectory
                 // Bind() has been called — fall through to live entry read.
             }
 
-            object? val = EnsureEntry().Properties[property].Value;
+            object? val = AssertBound().Properties[property].Value;
             return val is bool bVal ? bVal : defaultValue;
         }
 
@@ -472,9 +475,8 @@ namespace ActiveDirectory
             object? val;
             if (_cache != null)
             {
-                if (_cache.TryGetValue(property, out var vals))
+                if (_cache.TryGetValue(property, out var vals) && vals.Count > 0)
                 {
-                    if (vals.Count == 0) return null;
                     val = vals[0];
                     if (val == null) return null;
                     if (val is long l) return l;
@@ -488,7 +490,7 @@ namespace ActiveDirectory
                 // Bind() has been called — fall through to live entry read.
             }
 
-            val = EnsureEntry().Properties[property].Value;
+            val = AssertBound().Properties[property].Value;
             if (val == null) return null;
             if (val is long lv) return lv;
             if (val is int  iv) return iv;
@@ -635,7 +637,7 @@ namespace ActiveDirectory
         /// </summary>
         public void Save()
         {
-            EnsureEntry().CommitChanges();
+            AssertBound().CommitChanges();
         }
 
         /// <summary>
@@ -652,7 +654,7 @@ namespace ActiveDirectory
                 throw new ArgumentNullException(nameof(destinationOU));
             using var destination = new DirectoryEntry(
                 destinationOU.Contains("LDAP://") ? destinationOU : "LDAP://" + destinationOU);
-            EnsureEntry().MoveTo(destination);
+            AssertBound().MoveTo(destination);
         }
 
         /// <inheritdoc/>

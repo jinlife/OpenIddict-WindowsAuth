@@ -65,7 +65,7 @@ namespace ActiveDirectory
         /// <param name="obj">The AD object to add as a member.</param>
         public void AddMember(ADObject obj)
         {
-            EnsureEntry().Properties[ADProperties.Group.Member].Add(obj.LDAPName);
+            AssertBound().Properties[ADProperties.Group.Member].Add(obj.LDAPName);
         }
 
         /// <summary>
@@ -75,7 +75,7 @@ namespace ActiveDirectory
         /// <param name="obj">The AD object to remove from membership.</param>
         public void RemoveMember(ADObject obj)
         {
-            EnsureEntry().Properties[ADProperties.Group.Member].Remove(obj.LDAPName);
+            AssertBound().Properties[ADProperties.Group.Member].Remove(obj.LDAPName);
         }
 
         /// <summary>
