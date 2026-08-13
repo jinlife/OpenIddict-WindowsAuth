@@ -260,6 +260,7 @@ namespace IdentityServer
                                     identity.AddClaim(Claims.Subject, primarySid);
                                     identity.AddClaim(ClaimTypes.Name, samName);
                                     identity.AddClaim(Claims.PreferredUsername, samName);
+                                    identity.AddClaim(Claims.Name, samName); // Full Name
                                 }
 
                                 if (context.Request.HasScope(Scopes.Profile))
@@ -269,7 +270,9 @@ namespace IdentityServer
 
                                 if (context.Request.HasScope(Scopes.Email))
                                 {
-                                    identity.AddClaim(ClaimTypes.Email, samName + "@localhost");
+                                    string localEmail = samName + "@localhost";
+                                    identity.AddClaim(ClaimTypes.Email, localEmail);
+                                    identity.AddClaim(Claims.Email, localEmail); // OIDC "email" claim
                                 }
                             }
                             else
@@ -282,18 +285,23 @@ namespace IdentityServer
                                     identity.AddClaim(Claims.Subject, primarySid);
                                     identity.AddClaim(ClaimTypes.Name, user.DisplayName);
                                     identity.AddClaim(Claims.PreferredUsername, samName);
+                                    identity.AddClaim(Claims.Name, user.DisplayName); // Full Name
                                 }
 
                                 if (context.Request.HasScope(Scopes.Email))
                                 {
-                                    identity.AddClaim(ClaimTypes.Email, !string.IsNullOrEmpty(user.Email) ? user.Email : user.Username + "@localhost");
+                                    // user.Email reads the AD "mail" attribute; fall back to a synthetic
+                                    // address when mail is not populated in AD.
+                                    string email = !string.IsNullOrEmpty(user.Email) ? user.Email : user.Username + "@localhost";
+                                    identity.AddClaim(ClaimTypes.Email, email);
+                                    identity.AddClaim(Claims.Email, email); // OIDC "email" claim
                                 }
 
                                 if (context.Request.HasScope(Scopes.Profile))
                                 {
                                     identity.AddClaim(ClaimTypes.WindowsAccountName, winAccountName);
-                                    if (!string.IsNullOrEmpty(user.GivenName)) { identity.AddClaim(ClaimTypes.GivenName, user.GivenName); }
-                                    if (!string.IsNullOrEmpty(user.Surname)) { identity.AddClaim(ClaimTypes.Surname, user.Surname); }
+                                    if (!string.IsNullOrEmpty(user.GivenName)) { identity.AddClaim(ClaimTypes.GivenName, user.GivenName); identity.AddClaim(Claims.GivenName, user.GivenName); }
+                                    if (!string.IsNullOrEmpty(user.Surname)) { identity.AddClaim(ClaimTypes.Surname, user.Surname); identity.AddClaim(Claims.FamilyName, user.Surname); }
                                     if (!string.IsNullOrEmpty(user.TelephoneNumber)) { identity.AddClaim(ClaimTypes.HomePhone, user.TelephoneNumber); }
                                 }
 
