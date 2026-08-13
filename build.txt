@@ -1,0 +1,5 @@
+dotnet publish -c Release -p:RestoreSources="https://api.nuget.org/v3/index.json"
+
+or
+dotnet restore --source https://api.nuget.org/v3/index.json
+dotnet publish -c Release --no-restore

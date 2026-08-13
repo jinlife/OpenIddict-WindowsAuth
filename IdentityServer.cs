@@ -259,6 +259,7 @@ namespace IdentityServer
                                 {
                                     identity.AddClaim(Claims.Subject, primarySid);
                                     identity.AddClaim(ClaimTypes.Name, samName);
+                                    identity.AddClaim(Claims.PreferredUsername, samName);
                                 }
 
                                 if (context.Request.HasScope(Scopes.Profile))
@@ -280,6 +281,7 @@ namespace IdentityServer
                                 {
                                     identity.AddClaim(Claims.Subject, primarySid);
                                     identity.AddClaim(ClaimTypes.Name, user.DisplayName);
+                                    identity.AddClaim(Claims.PreferredUsername, samName);
                                 }
 
                                 if (context.Request.HasScope(Scopes.Email))
