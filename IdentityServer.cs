@@ -84,47 +84,66 @@ namespace IdentityServer
 
         /// <summary>
         /// Loads an <see cref="ADUser"/> from Active Directory with a bounded timeout and retries.
-        /// A long-idle process can hold a stale ADSI connection that hangs the lookup indefinitely
-        /// (System.DirectoryServices has no client-side timeout). The timeout forces the attempt to be
-        /// abandoned, and the retry opens a fresh connection on the next pass - so the end user gets a
-        /// working login on the very first click instead of having to retry several failed attempts.
+        /// After a long idle, the underlying ADSI/LDAP connection can go stale and the lookup fails
+        /// immediately (e.g. "The server is not operational") or hangs. Retries alone are not enough:
+        /// firing them back-to-back all lands in the same broken window, so a short delay between
+        /// attempts lets the OS re-establish the domain-controller connection. The first real login
+        /// therefore self-heals on the very first click instead of rejecting and forcing a retry.
         /// </summary>
         private static async Task<ADUser> LoadAdUserAsync(string winAccountName, ILogger logger, CancellationToken ct)
         {
-            int attempts = Math.Max(1, Program.Configuration.GetValue("IdentityServer:AdLookupAttempts", 3));
+            int attempts = Math.Max(1, Program.Configuration.GetValue("IdentityServer:AdLookupAttempts", 5));
             var timeout = TimeSpan.FromSeconds(
                 Math.Max(1, Program.Configuration.GetValue("IdentityServer:AdLookupTimeoutSeconds", 15)));
+            var retryDelay = TimeSpan.FromSeconds(
+                Math.Max(0, Program.Configuration.GetValue("IdentityServer:AdLookupRetryDelaySeconds", 2)));
 
+            Exception? lastError = null;
             for (int attempt = 1; attempt <= attempts; attempt++)
             {
+                bool isFinal = attempt == attempts;
                 try
                 {
+                    // On the final attempt, await without the timeout wrapper so a genuine error surfaces.
                     Task<ADUser> lookup = Task.Run(() => new ADUser(winAccountName), ct);
+                    if (isFinal)
+                    {
+                        return await lookup;
+                    }
+
                     Task completed = await Task.WhenAny(lookup, Task.Delay(timeout, ct));
                     if (ReferenceEquals(completed, lookup))
                     {
                         return await lookup; // observe any exception thrown by the constructor
                     }
 
-                    // Timed out: dispose the orphaned entry on a best-effort basis and retry.
+                    // Timed out: dispose the orphaned entry on a best-effort basis and retry after a delay.
                     logger.LogWarning(
-                        "AD lookup for '{User}' timed out after {Timeout}s (attempt {Attempt}/{Attempts}); retrying with a fresh connection.",
-                        winAccountName, timeout.TotalSeconds, attempt, attempts);
+                        "AD lookup for '{User}' timed out after {Timeout}s (attempt {Attempt}/{Attempts}); retrying after {Delay}s.",
+                        winAccountName, timeout.TotalSeconds, attempt, attempts, retryDelay.TotalSeconds);
                     _ = lookup.ContinueWith(t =>
                     {
                         try { t.GetAwaiter().GetResult()?.Dispose(); } catch { /* ignore */ }
                     }, TaskScheduler.Default);
                 }
-                catch (Exception ex) when (attempt < attempts)
+                catch (Exception ex) when (!isFinal)
                 {
+                    lastError = ex;
                     logger.LogWarning(ex,
-                        "AD lookup for '{User}' failed (attempt {Attempt}/{Attempts}); retrying.",
-                        winAccountName, attempt, attempts);
+                        "AD lookup for '{User}' failed (attempt {Attempt}/{Attempts}); retrying after {Delay}s.",
+                        winAccountName, attempt, attempts, retryDelay.TotalSeconds);
+                }
+
+                // Give the OS/ADSI connection time to recover before the next attempt.
+                if (!isFinal && retryDelay > TimeSpan.Zero)
+                {
+                    await Task.Delay(retryDelay, ct);
                 }
             }
 
-            // Final attempt: no timeout wrapper so a genuine error surfaces to the caller.
-            return new ADUser(winAccountName);
+            // All attempts failed: surface the last error rather than swallowing it.
+            throw new InvalidOperationException(
+                $"Active Directory lookup for '{winAccountName}' failed after {attempts} attempts.", lastError);
         }
 
         /// <summary>
@@ -326,8 +345,19 @@ namespace IdentityServer
                             else
                             {
                                 // Fetch user attributes from Active Directory
-                                using ADUser user = await LoadAdUserAsync(winAccountName, logger, CancellationToken.None);
-
+                                ADUser? user = null;
+                                try
+                                {
+                                    user = await LoadAdUserAsync(winAccountName, logger, CancellationToken.None);
+                                }
+                                catch (Exception ex)
+                                {
+                                    logger.LogError(ex, "Active Directory lookup for '{User}' failed after retries; rejecting authorization request.", winAccountName);
+                                    context.Reject(error: Errors.ServerError, description: "Unable to contact Active Directory. Please try again.");
+                                    return;
+                                }
+                                using (user)
+                                {
                                 if (context.Request.HasScope(Scopes.OpenId))
                                 {
                                     identity.AddClaim(Claims.Subject, primarySid);
@@ -374,6 +404,7 @@ namespace IdentityServer
                                     if (roleCharCount > 4096)
                                         logger.LogWarning("User {User} has {Chars} characters of role claims — token may be large enough to trigger HTTP 431 errors. Consider tightening IdentityServer:Groups patterns.",
                                             winAccountName, roleCharCount);
+                                }
                                 }
                             }
 
