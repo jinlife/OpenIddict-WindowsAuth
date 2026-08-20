@@ -18,6 +18,9 @@ using static OpenIddict.Server.OpenIddictServerEvents;
 using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Server.IISIntegration;
+using System.DirectoryServices;
+using System.Threading;
+using System.Threading.Tasks;
 using ActiveDirectory;
 
 namespace IdentityServer
@@ -78,6 +81,51 @@ namespace IdentityServer
             Program.Configuration.GetSection("IdentityServer:Groups").Get<string[]>()!
                 .Select(g => new Regex(g, RegexOptions.IgnoreCase | RegexOptions.Compiled))
                 .ToArray();
+
+        /// <summary>
+        /// Loads an <see cref="ADUser"/> from Active Directory with a bounded timeout and retries.
+        /// A long-idle process can hold a stale ADSI connection that hangs the lookup indefinitely
+        /// (System.DirectoryServices has no client-side timeout). The timeout forces the attempt to be
+        /// abandoned, and the retry opens a fresh connection on the next pass - so the end user gets a
+        /// working login on the very first click instead of having to retry several failed attempts.
+        /// </summary>
+        private static async Task<ADUser> LoadAdUserAsync(string winAccountName, ILogger logger, CancellationToken ct)
+        {
+            int attempts = Math.Max(1, Program.Configuration.GetValue("IdentityServer:AdLookupAttempts", 3));
+            var timeout = TimeSpan.FromSeconds(
+                Math.Max(1, Program.Configuration.GetValue("IdentityServer:AdLookupTimeoutSeconds", 15)));
+
+            for (int attempt = 1; attempt <= attempts; attempt++)
+            {
+                try
+                {
+                    Task<ADUser> lookup = Task.Run(() => new ADUser(winAccountName), ct);
+                    Task completed = await Task.WhenAny(lookup, Task.Delay(timeout, ct));
+                    if (ReferenceEquals(completed, lookup))
+                    {
+                        return await lookup; // observe any exception thrown by the constructor
+                    }
+
+                    // Timed out: dispose the orphaned entry on a best-effort basis and retry.
+                    logger.LogWarning(
+                        "AD lookup for '{User}' timed out after {Timeout}s (attempt {Attempt}/{Attempts}); retrying with a fresh connection.",
+                        winAccountName, timeout.TotalSeconds, attempt, attempts);
+                    _ = lookup.ContinueWith(t =>
+                    {
+                        try { t.GetAwaiter().GetResult()?.Dispose(); } catch { /* ignore */ }
+                    }, TaskScheduler.Default);
+                }
+                catch (Exception ex) when (attempt < attempts)
+                {
+                    logger.LogWarning(ex,
+                        "AD lookup for '{User}' failed (attempt {Attempt}/{Attempts}); retrying.",
+                        winAccountName, attempt, attempts);
+                }
+            }
+
+            // Final attempt: no timeout wrapper so a genuine error surfaces to the caller.
+            return new ADUser(winAccountName);
+        }
 
         /// <summary>
         /// Loads a persistent RSA key from <paramref name="filename"/> under <c>IdentityServer:DataPath</c>
@@ -278,7 +326,7 @@ namespace IdentityServer
                             else
                             {
                                 // Fetch user attributes from Active Directory
-                                using ADUser user = new ADUser(winAccountName);
+                                using ADUser user = await LoadAdUserAsync(winAccountName, logger, CancellationToken.None);
 
                                 if (context.Request.HasScope(Scopes.OpenId))
                                 {
@@ -302,7 +350,10 @@ namespace IdentityServer
                                     identity.AddClaim(ClaimTypes.WindowsAccountName, winAccountName);
                                     if (!string.IsNullOrEmpty(user.GivenName)) { identity.AddClaim(ClaimTypes.GivenName, user.GivenName); identity.AddClaim(Claims.GivenName, user.GivenName); }
                                     if (!string.IsNullOrEmpty(user.Surname)) { identity.AddClaim(ClaimTypes.Surname, user.Surname); identity.AddClaim(Claims.FamilyName, user.Surname); }
-                                    if (!string.IsNullOrEmpty(user.TelephoneNumber)) { identity.AddClaim(ClaimTypes.HomePhone, user.TelephoneNumber); }
+                                    // Work phone (AD telephoneNumber) -> standard OIDC "phone_number" claim
+                                    if (!string.IsNullOrEmpty(user.TelephoneNumber)) { identity.AddClaim(Claims.PhoneNumber, user.TelephoneNumber); }
+                                    // Mobile phone (AD mobile) -> emitted only when present
+                                    if (!string.IsNullOrEmpty(user.MobilePhone)) { identity.AddClaim(ClaimTypes.MobilePhone, user.MobilePhone); }
                                 }
 
                                 if (context.Request.HasScope(Scopes.Roles))
