@@ -24,7 +24,8 @@ namespace IdentityServer
         {
             if (context.User.Identity?.IsAuthenticated == true
                 || context.Request.Path.StartsWithSegments("/.well-known")
-                || context.Request.Path.StartsWithSegments("/connect/token"))
+                || context.Request.Path.StartsWithSegments("/connect/token")
+                || context.Request.Path.StartsWithSegments("/api/ad"))
             {
                 await next(context);
             }
