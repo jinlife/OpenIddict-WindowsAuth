@@ -394,10 +394,10 @@ namespace IdentityServer
                                     {
                                         if (ValidGroupPatterns.Any(rx => rx.IsMatch(group)))
                                         {
-                                            identity.AddClaim(ClaimTypes.Role, group);
+                                            identity.AddClaim(Claims.Role, group);
                                         }
                                     }
-                                    var matchedRoles = identity.FindAll(ClaimTypes.Role).ToList();
+                                    var matchedRoles = identity.FindAll(Claims.Role).ToList();
                                     int roleCharCount = matchedRoles.Sum(c => c.Value.Length);
                                     logger.LogDebug("User {User} has {Total} AD groups; {Matched} matched configured patterns ({Chars} chars)",
                                         winAccountName, groups.Count, matchedRoles.Count, roleCharCount);

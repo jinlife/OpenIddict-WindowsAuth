@@ -3,3 +3,12 @@ dotnet publish -c Release -p:RestoreSources="https://api.nuget.org/v3/index.json
 or
 dotnet restore --source https://api.nuget.org/v3/index.json
 dotnet publish -c Release --no-restore
+
+
+Scope	标准 claim	       								我们对应发的
+openid	sub										Claims.Subject（primarySid）
+profile	name, preferred_username, given_name, family_name, phone_number			Claims.Name, Claims.PreferredUsername, Claims.GivenName, Claims.FamilyName, Claims.PhoneNumber
+email	email										Claims.Email（+ ClaimTypes.Email）
+roles	role										Claims.Role（标准 OIDC 短名 "role"）
+
+Mobile Phone	http://schemas.xmlsoap.org/ws/2005/05/identity/claims/mobilephone	WS-Federation 风格 URI（即 ClaimTypes.MobilePhone），因为 OpenIddict 没有标准的 mobile claim 常量
